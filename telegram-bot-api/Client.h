@@ -300,6 +300,7 @@ class Client final : public WebhookActor::Callback {
   class TdOnOkCallback;
   class TdOnAuthorizationCallback;
   class TdOnAuthorizationQueryCallback;
+  class TdOnQrAuthenticationCallback;
   class TdOnInitCallback;
   class TdOnGetUserProfilePhotosCallback;
   class TdOnGetUserProfileAudiosCallback;
@@ -1130,6 +1131,7 @@ class Client final : public WebhookActor::Callback {
 
   //custom auth methods
   void process_auth_phone_number_query(PromisedQueryPtr &query);
+  void process_auth_qr_query(PromisedQueryPtr &query);
   void process_authcode_query(PromisedQueryPtr &query);
   void process_2fapassword_query(PromisedQueryPtr &query);
   void process_register_user_query(PromisedQueryPtr &query);
@@ -1717,6 +1719,7 @@ class Client final : public WebhookActor::Callback {
   bool need_close_ = false;
   bool clear_tqueue_ = false;
   bool waiting_for_auth_input_ = false;
+  bool qr_auth_pending_ = false;
 
   td::ActorShared<> parent_;
   td::string bot_token_;

@@ -6871,6 +6871,15 @@ class Client::JsonAuthorizationState : public td::Jsonable {
       return;
     }
     switch (state_->get_id()) {
+      case td_api::authorizationStateWaitPhoneNumber::ID:
+        object("authorization_state", "wait_phone_number");
+        break;
+      case td_api::authorizationStateWaitOtherDeviceConfirmation::ID: {
+        object("authorization_state", "wait_other_device_confirmation");
+        auto state_qr = static_cast<const td_api::authorizationStateWaitOtherDeviceConfirmation *>(state_);
+        object("link", state_qr->link_);
+        break;
+      }
       case td_api::authorizationStateWaitCode::ID: {
         object("authorization_state", "wait_code");
         auto state_code = static_cast<const td_api::authorizationStateWaitCode *>(state_);
@@ -7130,6 +7139,24 @@ class Client::TdOnAuthorizationQueryCallback : public TdQueryCallback {
   Client *client_;
   PromisedQueryPtr query_;
   bool send_token_;
+};
+
+class Client::TdOnQrAuthenticationCallback final : public TdQueryCallback {
+ public:
+  TdOnQrAuthenticationCallback(Client *client, PromisedQueryPtr query) : client_(client), query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) final {
+    client_->qr_auth_pending_ = false;
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    answer_query(JsonAuthorizationState(client_->authorization_state_.get(), client_->bot_token_), std::move(query_));
+  }
+
+ private:
+  Client *client_;
+  PromisedQueryPtr query_;
 };
 
 class Client::TdOnInitCallback final : public TdQueryCallback {
@@ -10070,6 +10097,7 @@ void Client::on_update_authorization_state() {
     case td_api::authorizationStateWaitCode::ID:
     case td_api::authorizationStateWaitPassword::ID:
     case td_api::authorizationStateWaitRegistration::ID:
+    case td_api::authorizationStateWaitOtherDeviceConfirmation::ID:
       waiting_for_auth_input_ = true;
       return loop();
     case td_api::authorizationStateReady::ID: {
@@ -14533,6 +14561,14 @@ void Client::on_story_send_failed(int64 chat_id, int64 story_id, object_ptr<td_a
 
 void Client::on_cmd(PromisedQueryPtr query, bool force) {
   LOG(DEBUG) << "Process query " << *query;
+  if (is_user_ && !logging_out_ && !closing_) {
+    if (query->method() == "authstate") {
+      return answer_query(JsonAuthorizationState(authorization_state_.get()), std::move(query));
+    }
+    if (query->method() == "authqr") {
+      return process_auth_qr_query(query);
+    }
+  }
   if (!td_client_.empty() && was_authorized_) {
     if (query->method() == "close") {
       auto retry_after = static_cast<int>(10 * 60 - (td::Time::now() - start_time_));
@@ -14549,6 +14585,9 @@ void Client::on_cmd(PromisedQueryPtr query, bool force) {
   }
   if (waiting_for_auth_input_) {
     if (query->method().empty()) {
+      if (query->arg("auth_type") == "qr") {
+        return process_auth_qr_query(query);
+      }
       return process_auth_phone_number_query(query);
     } else if (query->method() == "authcode") {
       return process_authcode_query(query);
@@ -18308,6 +18347,30 @@ td::Status Client::process_edit_message_scheduling_query(PromisedQueryPtr &query
 
 //end custom user methods impl
 //start custom auth methods impl
+
+void Client::process_auth_qr_query(PromisedQueryPtr &query) {
+  if (qr_auth_pending_) {
+    return fail_query(409, "Conflict: QR authentication request is already in progress", std::move(query));
+  }
+  if (authorization_state_ == nullptr) {
+    return fail_query(400, "Bad Request: authorization state is not initialized", std::move(query));
+  }
+  switch (authorization_state_->get_id()) {
+    case td_api::authorizationStateWaitOtherDeviceConfirmation::ID:
+      // TDLib rotates the link automatically; polling must not restart authentication.
+      return answer_query(JsonAuthorizationState(authorization_state_.get(), bot_token_), std::move(query));
+    case td_api::authorizationStateWaitPhoneNumber::ID:
+    case td_api::authorizationStateWaitCode::ID:
+    case td_api::authorizationStateWaitPassword::ID:
+    case td_api::authorizationStateWaitRegistration::ID:
+      break;
+    default:
+      return fail_query(400, "Bad Request: QR authentication is unavailable in the current state", std::move(query));
+  }
+  qr_auth_pending_ = true;
+  send_request(make_object<td_api::requestQrCodeAuthentication>(td::vector<int64>()),
+               td::make_unique<TdOnQrAuthenticationCallback>(this, std::move(query)));
+}
 
 void Client::process_auth_phone_number_query(PromisedQueryPtr &query) {
   td::MutableSlice r_phone_number = query->arg("phone_number");
