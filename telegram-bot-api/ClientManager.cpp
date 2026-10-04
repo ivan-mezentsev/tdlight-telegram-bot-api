@@ -152,24 +152,34 @@ void ClientManager::user_login(PromisedQueryPtr query) {
   if (!parameters_->allow_users_) {
     return fail_query(405, "Method Not Allowed: Users are not allowed to use the api", std::move(query));
   }
-  td::MutableSlice r_phone_number = query->arg("phone_number");
-  if (r_phone_number.size() < 5 || r_phone_number.size() > 15) {
-    return fail_query(401, "Unauthorized: invalid phone number specified", std::move(query));
+  auto auth_type = query->arg("auth_type");
+  bool qr_login = auth_type == "qr";
+  if (!auth_type.empty() && auth_type != "phone" && !qr_login) {
+    return fail_query(400, "Bad Request: unsupported auth_type", std::move(query));
   }
-  td::int64 phone_number = 0;
-  for (char const &c: r_phone_number) {
-    if (isdigit(c)) {
-      phone_number = phone_number * 10 + (c - 48);
+  td::int64 token_id = 0;
+  if (qr_login) {
+    // QR login has no phone number; use a positive, random session identifier.
+    token_id = (td::Random::secure_int64() & ((static_cast<td::int64>(1) << 52) - 1)) + 1;
+  } else {
+    td::MutableSlice r_phone_number = query->arg("phone_number");
+    if (r_phone_number.size() < 5 || r_phone_number.size() > 15) {
+      return fail_query(401, "Unauthorized: invalid phone number specified", std::move(query));
+    }
+    for (char const &c : r_phone_number) {
+      if (isdigit(c)) {
+        token_id = token_id * 10 + (c - 48);
+      }
     }
   }
   td::UInt256 token_data;
   td::Random::secure_bytes(token_data.raw, sizeof(token_data));
-  td::string user_token = td::to_string(phone_number) + ":" + td::base64url_encode(token_data.as_slice());
+  td::string user_token = td::to_string(token_id) + ":" + td::base64url_encode(token_data.as_slice());
   auto user_token_with_dc = PSTRING() << user_token << (query->is_test_dc() ? ":T" : "");
 
   long token_hash = std::hash<td::string>{}(user_token);
 
-  auto tqueue_id = get_tqueue_id(token_hash, query->is_test_dc());
+  auto tqueue_id = get_tqueue_id(qr_login ? token_id : token_hash, query->is_test_dc());
   if (active_client_count_.find(tqueue_id) != active_client_count_.end()) {
     // return query->set_retry_after_error(1);
   }
@@ -178,8 +188,7 @@ void ClientManager::user_login(PromisedQueryPtr query) {
   auto *client_info = clients_.get(id);
   auto stat_actor = client_info->stat_.actor_id(&client_info->stat_);
   auto client_id = td::create_actor<Client>(PSLICE() << "Client/" << user_token, actor_shared(this, id), user_token,
-                                            true, query->is_test_dc(), get_tqueue_id(token_hash, query->is_test_dc()),
-                                            parameters_, std::move(stat_actor));
+                                            true, query->is_test_dc(), tqueue_id, parameters_, std::move(stat_actor));
 
   clients_.get(id)->client_ = std::move(client_id);
   auto id_it = token_to_id_.find(user_token);

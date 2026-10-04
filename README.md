@@ -159,6 +159,41 @@ You can now log into the bot api with user accounts to create userbots running o
 
 Note: Never send your 2fa password over a plain http connection. Make sure https is enabled or use this api locally.
 
+#### QR Code Authorization
+
+User Mode must be enabled with `--allow-users` (or `TELEGRAM_ALLOW_USERS=1` in Docker).
+
+1. Send `POST /userlogin?auth_type=qr`. No phone number is required. The response uses the
+   normal Bot API envelope:
+
+   ```json
+   {
+     "ok": true,
+     "result": {
+       "token": "<user_token>",
+       "authorization_state": "wait_other_device_confirmation",
+       "link": "tg://login?token=<login_token>"
+     }
+   }
+   ```
+
+2. Encode `result.link` as a QR code and scan it with an already authenticated Telegram app.
+   This server returns the link, not a PNG or SVG image. Treat both the link and the user token as secrets.
+3. Poll `GET /user<user_token>/authstate` for the current authorization state and current link.
+   TDLib rotates the link automatically; redraw the QR code whenever the returned link changes.
+4. If the state is `wait_password`, submit the account's 2FA password using
+   `POST /user<user_token>/2fapassword` with the `password` parameter.
+5. Once the state is `ready`, use the existing `/user<user_token>/<method>` API.
+
+`POST /user<user_token>/authqr` also requests QR authentication for an existing, pending user
+session. When already waiting for QR confirmation, it returns the latest link without restarting
+login. It returns HTTP 400 for an already authenticated session and HTTP 409 if a QR request is
+already in progress. QR requests pass an empty `other_user_ids` list to TDLib.
+
+`authstate` is read-only and remains available after login. The original phone login flow is
+unchanged; an omitted `auth_type` or `auth_type=phone` selects it. Other `auth_type` values return
+HTTP 400. API errors during QR authentication are returned to the caller.
+
 #### User Authorization Process
 1. Send a request to `{api_url}/userlogin`
 
